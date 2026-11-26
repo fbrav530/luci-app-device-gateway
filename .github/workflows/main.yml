@@ -1,97 +1,75 @@
-# Build luci-app-device-gateway (.apk) for OpenWrt 25.12 with GitHub Actions.
-#
-# The package is LUCI_PKGARCH:=all (pure Lua / JS / static files), so a single
-# SDK build produces one .apk that installs on every architecture. The SDK
-# target below (mediatek/filogic) only decides which SDK is used to build it;
-# any 25.12 SDK would produce the same file. Change SDK_TARGET / SDK_SUBTARGET
-# / SDK_URL if you prefer another target's SDK.
-#
-# Usage:
-#   1. Put this file at .github/workflows/build.yml in the repo.
-#   2. Push to main (or open a PR) -> the .apk appears under Actions > Artifacts.
-#   3. Tag a release, e.g. `git tag v1.0.0 && git push origin v1.0.0` ->
-#      a GitHub Release is created with the .apk attached.
-#
-# Install on the router (OpenWrt 25.12 uses apk, not opkg):
-#   apk add luci-app-device-gateway_1.0.0-r1_all.apk
-
-name: Build .apk (OpenWrt 25.12)
+name: 编译本地LuCI插件(APK)
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
-
-permissions:
-  contents: write
-
-env:
-  OPENWRT_VERSION: 25.12.0
-  SDK_TARGET: mediatek
-  SDK_SUBTARGET: filogic
-  SDK_URL: https://downloads.openwrt.org/releases/25.12.0/targets/mediatek/filogic/openwrt-sdk-25.12.0-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 签出本仓库源码
         uses: actions/checkout@v4
 
-      - name: Install build prerequisites
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-setuptools rsync unzip zlib1g-dev file wget zstd
+          # 安装 zstd 用于解压新版 SDK 的 tar.zst 格式
+          sudo apt-get install -y zstd curl
 
-      - name: Download OpenWrt SDK
+      - name: 下载并配置工具链
         run: |
-          curl -fLO "$SDK_URL"
-          ls -lh openwrt-sdk-*.tar.zst
-
-      - name: Extract SDK
-        run: |
-          tar -I zstd -xf openwrt-sdk-*.tar.zst
-          echo "SDK_DIR=$(echo openwrt-sdk-*/ | sed 's:/$::')" >> "$GITHUB_ENV"
-
-      - name: Update luci feed
-        working-directory: ${{ env.SDK_DIR }}
-        run: |
-          ./scripts/feeds update luci
-          ./scripts/feeds install luci-base
-
-      - name: Copy package into SDK
-        run: |
-          mkdir -p "$SDK_DIR/package/luci-app-device-gateway"
-          cp -r Makefile htdocs root "$SDK_DIR/package/luci-app-device-gateway/"
-
-      - name: Build package
-        working-directory: ${{ env.SDK_DIR }}
-        run: |
+          sudo timedatectl set-timezone Asia/Shanghai
+          
+          # 创建 SDK 目录并进入
+          mkdir sdk && cd sdk
+          
+          BASE_URL="https://downloads.openwrt.org/snapshots/targets/rockchip/armv8/"
+          
+          # 使用 curl -sL 跟随重定向，并解析 sha256sums 纯文本文件获取最新 SDK 名称
+          SDK_FILE=$(curl -sL "${BASE_URL}sha256sums" | grep -oE 'openwrt-sdk-rockchip-armv8[a-zA-Z0-9_\.-]+\.tar\.(zst|xz)' | head -n 1)
+          
+          if [ -z "$SDK_FILE" ]; then
+            echo "错误: 未能抓取到 SDK 文件名，请检查 OpenWrt 官网状态。"
+            exit 1
+          fi
+          
+          echo "成功获取 SDK 文件名: $SDK_FILE"
+          echo "正在下载最新 SDK: ${BASE_URL}${SDK_FILE}"
+          
+          # 统一将下载的文件命名为 sdk_archive
+          wget -qO sdk_archive "${BASE_URL}${SDK_FILE}"
+          
+          # 自动判断后缀名并使用正确的解压方式
+          if [[ "$SDK_FILE" == *.zst ]]; then
+            tar -I zstd -xf sdk_archive --strip-components=1
+          else
+            tar -xf sdk_archive --strip-components=1
+          fi
+          rm -f sdk_archive
+          
+          # 1. 创建插件的目标目录
+          mkdir -p package/luci-app-generic-runner/root
+          
+          # 2. 复制根目录下的 Makefile 到插件目录
+          cp ../Makefile package/luci-app-generic-runner/
+          
+          # 3. 把根目录下的 etc 和 usr 目录，复制到插件的 root 文件夹下
+          [ -d "../etc" ] && cp -R ../etc package/luci-app-generic-runner/root/
+          [ -d "../usr" ] && cp -R ../usr package/luci-app-generic-runner/root/
+          
+          # 更新 feeds 并生成默认配置
+          ./scripts/feeds update -a
           make defconfig
-          make package/luci-app-device-gateway/compile V=s
 
-      - name: Locate .apk
+      - name: 开始编译
         run: |
-          APK=$(find "$SDK_DIR/bin/packages" -name 'luci-app-device-gateway_*.apk' | head -n 1)
-          test -n "$APK" || { echo "::error::no .apk found"; find "$SDK_DIR/bin" -type f | head -30; exit 1; }
-          echo "APK=$APK" >> "$GITHUB_ENV"
-          ls -lh "$APK"
+          cd sdk
+          # V=s 用于输出详细日志，-j 用于多线程加速
+          make package/luci-app-generic-runner/compile V=s -j$(nproc)
 
-      - name: Upload .apk artifact
+      - name: 上传编译附件
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-device-gateway-25.12-all
-          path: ${{ env.APK }}
-          if-no-files-found: error
-
-      - name: Attach .apk to release (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.APK }}
-          generate_release_notes: true
+          name: luci-app-generic-runner-apk
+          # 使用 *.apk 捕获所有生成的 apk 文件，跨过多层目录寻找以防打包位置变动
+          path: sdk/bin/packages/aarch64_generic/*/*.apk
