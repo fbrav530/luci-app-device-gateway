@@ -89,7 +89,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: luci-app-device-gateway-apk
-          # 只取我们自己的包。这个包是 all 架构，产物在
-          # bin/packages/all/luci/ 下（不是 aarch64_generic/），
-          # 用通配是防止打包位置随 SDK 版本变动。
-          path: sdk/bin/packages/*/luci/luci-app-device-gateway_*.apk
+          # 只取我们自己的包。注意：包是拷进 sdk/package/ 的，属于 base feed，
+          # 产物在 bin/packages/<target-arch>/base/ 下（不是 .../luci/）；
+          # apk 文件名用短横线：luci-app-device-gateway-1.0.0-r1.apk
+          # （下划线是 .ipk 的写法）。用 ** 通配，位置随 SDK 变动也不怕。
+          path: sdk/bin/packages/**/luci-app-device-gateway-*.apk
