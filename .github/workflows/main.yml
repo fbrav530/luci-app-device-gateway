@@ -1,3 +1,18 @@
+# 编译 luci-app-device-gateway (APK)，改编自 luci-app-generic-runner 的可用版本。
+#
+# 直接套用原版会失败，原因只有一个：两个仓库的目录结构不一样。
+# generic-runner 的文件在仓库根目录的 etc/ usr/ 下，所以原版是把 etc/ usr/
+# 拷进 package/.../root/；而 device-gateway 的文件在 htdocs/ 和 root/ 下
+# （root/ 里面才是 etc/ usr/），根目录根本没有 etc/ usr/，原版的
+# `[ -d "../etc" ]` 判断直接跳过，最后打出来的包是空的（只有 Makefile）。
+# 所以改法就是：名字换掉，改成按 device-gateway 的结构复制 Makefile + htdocs/ + root/。
+#
+# 另外注意：这个包是 LUCI_PKGARCH:=all（纯 Lua/JS/静态文件），SDK 用哪个 target
+# 都不影响产物，这里沿用原版的 snapshots rockchip/armv8 SDK（实测能编过；
+# 25.12.0 正式版 SDK 在我这边编 lucihttp 依赖时失败，改用 snapshots 绕过）。
+# 编出来的 luci-app-device-gateway_1.0.0-r1_all.apk 可装在 25.12 上：
+#   apk add luci-app-device-gateway_1.0.0-r1_all.apk
+
 name: 编译本地LuCI插件(APK)
 
 on:
@@ -19,26 +34,26 @@ jobs:
       - name: 下载并配置工具链
         run: |
           sudo timedatectl set-timezone Asia/Shanghai
-          
+
           # 创建 SDK 目录并进入
           mkdir sdk && cd sdk
-          
+
           BASE_URL="https://downloads.openwrt.org/snapshots/targets/rockchip/armv8/"
-          
+
           # 使用 curl -sL 跟随重定向，并解析 sha256sums 纯文本文件获取最新 SDK 名称
           SDK_FILE=$(curl -sL "${BASE_URL}sha256sums" | grep -oE 'openwrt-sdk-rockchip-armv8[a-zA-Z0-9_\.-]+\.tar\.(zst|xz)' | head -n 1)
-          
+
           if [ -z "$SDK_FILE" ]; then
             echo "错误: 未能抓取到 SDK 文件名，请检查 OpenWrt 官网状态。"
             exit 1
           fi
-          
+
           echo "成功获取 SDK 文件名: $SDK_FILE"
           echo "正在下载最新 SDK: ${BASE_URL}${SDK_FILE}"
-          
+
           # 统一将下载的文件命名为 sdk_archive
           wget -qO sdk_archive "${BASE_URL}${SDK_FILE}"
-          
+
           # 自动判断后缀名并使用正确的解压方式
           if [[ "$SDK_FILE" == *.zst ]]; then
             tar -I zstd -xf sdk_archive --strip-components=1
@@ -46,17 +61,20 @@ jobs:
             tar -xf sdk_archive --strip-components=1
           fi
           rm -f sdk_archive
-          
+
           # 1. 创建插件的目标目录
-          mkdir -p package/luci-app-generic-runner/root
-          
+          mkdir -p package/luci-app-device-gateway
+
           # 2. 复制根目录下的 Makefile 到插件目录
-          cp ../Makefile package/luci-app-generic-runner/
-          
-          # 3. 把根目录下的 etc 和 usr 目录，复制到插件的 root 文件夹下
-          [ -d "../etc" ] && cp -R ../etc package/luci-app-generic-runner/root/
-          [ -d "../usr" ] && cp -R ../usr package/luci-app-generic-runner/root/
-          
+          cp ../Makefile package/luci-app-device-gateway/
+
+          # 3. device-gateway 的文件在 htdocs/ 和 root/ 下（不是顶层的 etc/ usr/），
+          #    整个复制进去；luci.mk 会把 htdocs/ 和 root/ 打进包里。
+          #    注意：不要再像原版那样建 package/.../root 再拷 etc/ usr/，
+          #    这里的 root/ 本身就是要打进包的目录结构。
+          cp -R ../htdocs package/luci-app-device-gateway/
+          cp -R ../root package/luci-app-device-gateway/
+
           # 更新 feeds 并生成默认配置
           ./scripts/feeds update -a
           make defconfig
@@ -65,11 +83,13 @@ jobs:
         run: |
           cd sdk
           # V=s 用于输出详细日志，-j 用于多线程加速
-          make package/luci-app-generic-runner/compile V=s -j$(nproc)
+          make package/luci-app-device-gateway/compile V=s -j$(nproc)
 
       - name: 上传编译附件
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-generic-runner-apk
-          # 使用 *.apk 捕获所有生成的 apk 文件，跨过多层目录寻找以防打包位置变动
-          path: sdk/bin/packages/aarch64_generic/*/*.apk
+          name: luci-app-device-gateway-apk
+          # 只取我们自己的包。这个包是 all 架构，产物在
+          # bin/packages/all/luci/ 下（不是 aarch64_generic/），
+          # 用通配是防止打包位置随 SDK 版本变动。
+          path: sdk/bin/packages/*/luci/luci-app-device-gateway_*.apk
